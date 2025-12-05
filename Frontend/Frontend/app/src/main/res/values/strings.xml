@@ -1,0 +1,19 @@
+<resources>
+
+    <string name="app_name">AI Loan Advisor</string>
+
+    <string name="google_web_client_id">
+        295332376348-vuf3defrqij70slo90jbcvo303fgip0r.apps.googleusercontent.com
+    </string>
+
+    <!-- Eligibility Screen -->
+    <string name="eligibility_age_hint">Age</string>
+    <string name="eligibility_income_hint">Monthly Income</string>
+    <string name="eligibility_emi_hint">Existing EMI</string>
+    <string name="eligibility_check_button">Check Eligibility</string>
+    <string-array name="job_types">
+        <item>Salaried</item>
+        <item>Self-employed</item>
+    </string-array>
+
+</resources>
