@@ -1,0 +1,27 @@
+# FastAPI and server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+pydantic>=2.10.0
+
+# Gemini API
+google-generativeai==0.3.2
+
+# Environment variables
+python-dotenv==1.0.0
+
+# STT (Speech-to-Text) - Local Whisper
+openai-whisper>=20231117
+ffmpeg-python>=0.2.0  # For audio processing
+
+# Optional: For better language detection
+# langdetect==1.0.9
+
+# Optional: For database (if you upgrade from SQLite)
+# sqlalchemy==2.0.23
+# databases==0.8.0
+
+# Optional: For OCR (if needed in backend)
+# pytesseract==0.3.10
+# Pillow==10.1.0
+
