@@ -9,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.ailoanadvisor.databinding.ActivityChatBinding
+import com.google.firebase.auth.FirebaseAuth
 
 class ChatActivity : AppCompatActivity() {
 
@@ -46,8 +47,21 @@ class ChatActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // ✅ Force app to always start from login
+        val isLoggedIn = getSharedPreferences("user", MODE_PRIVATE)
+            .getBoolean("loggedIn", false)
+
+        if (!isLoggedIn) {
+            startActivity(Intent(this, LoginActivity::class.java))
+            finish()
+            return
+        }
+
         binding = ActivityChatBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Enable the back button in the action bar
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
         adapter = SimpleChatAdapter(messageList)
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
@@ -56,7 +70,21 @@ class ChatActivity : AppCompatActivity() {
         // The chat view is hidden initially; the welcome/FAQ view is shown.
         binding.recyclerView.isVisible = false
 
-        // ✅ FAQ Click Auto-Type (UPDATED)
+        // --- Button Click Listeners ---
+
+        binding.btnProfile.setOnClickListener {
+            startActivity(Intent(this, ProfileActivity::class.java))
+        }
+
+        binding.btnLogout.setOnClickListener {
+            FirebaseAuth.getInstance().signOut()
+            val intent = Intent(this, LoginActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+            }
+            startActivity(intent)
+            finish()
+        }
+
         binding.faq1.setOnClickListener {
             startActivity(Intent(this, EligibilityActivity::class.java))
         }
@@ -69,7 +97,6 @@ class ChatActivity : AppCompatActivity() {
             autoAsk("Documents required for loan")
         }
 
-        // ✅ Send Button
         binding.btnSend.setOnClickListener {
             val msg = binding.etMessage.text.toString().trim()
             if (msg.isNotEmpty()) {
@@ -82,12 +109,10 @@ class ChatActivity : AppCompatActivity() {
             }
         }
 
-        // ✅ Document Attach
         binding.btnAttach.setOnClickListener {
             documentPickerLauncher.launch("*/*")
         }
 
-        // ✅ Voice Input
         binding.btnMic.setOnClickListener {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(
@@ -97,6 +122,13 @@ class ChatActivity : AppCompatActivity() {
             }
             speechResultLauncher.launch(intent)
         }
+    }
+
+    // Handle the back button press in the action bar
+    override fun onSupportNavigateUp(): Boolean {
+        // This is now the recommended way to handle back navigation
+        onBackPressedDispatcher.onBackPressed()
+        return true
     }
 
     private fun autoAsk(text: String) {

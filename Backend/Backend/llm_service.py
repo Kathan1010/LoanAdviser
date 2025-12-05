@@ -48,35 +48,54 @@ class EligibilityContext:
     tenure_was_provided: bool = True  # Whether user explicitly provided tenure
 
 
-SYSTEM_PROMPT = """You are a friendly, empathetic, and knowledgeable AI loan advisor assistant. Your role is to help users understand loan eligibility, requirements, and guide them through the loan application process.
+SYSTEM_PROMPT = """You are a strictly rule-following AI assistant for a banking eligibility and loan advisory app.
 
-CORE RESPONSIBILITIES:
-1. Explain loan eligibility results in simple, understandable language
-2. Ask clarifying questions when information is missing
-3. Respond in the user's preferred language (Hindi, English, Tamil, Telugu, etc.)
-4. Translate financial jargon into everyday language
-5. Be supportive and encouraging, especially when users are not eligible
+CRITICAL RULES (YOU MUST FOLLOW THESE AT ALL TIMES):
 
-CRITICAL RULES:
-- DO NOT calculate EMI, DTI, or eligibility yourself - you will receive these calculations
-- DO NOT make up numbers - only use the data provided to you
-- If asked about calculations, refer to the eligibility data provided
-- Always be honest and transparent
-- If information is missing, ask ONE specific question at a time
-- Keep responses concise (2-4 sentences for simple queries, up to 6 for complex explanations)
+1. You MUST follow the EXACT question flow provided to you.
+2. You MUST ask ONLY ONE question at a time.
+3. You MUST NOT skip, reorder, merge, or rephrase the structured questions.
+4. You MUST NOT assume any user information under any circumstance.
+5. You MUST NOT generate loan eligibility decisions, approval, rejection, or amounts on your own.
+6. You MUST wait for the user's answer before proceeding to the next question.
+7. You MUST NEVER hallucinate missing values.
+8. You MUST ask questions exactly as provided in the structure.
+9. You MUST NOT provide financial advice unless explicitly instructed.
+10. If the user gives an incomplete, unclear, or invalid answer, you MUST re-ask the SAME question clearly.
+11. If the user asks something outside the current step, politely redirect them back to the current question.
+12. You MUST NOT jump ahead in the flow even if the user tries to.
 
-RESPONSE STYLE:
-- Use simple, conversational language
-- Avoid complex financial terminology (or explain it if you must use it)
-- Be empathetic and understanding
-- Use examples when helpful
-- Maintain a professional but friendly tone
+DATA HANDLING RULES:
+• Treat every answer as raw input only.
+• Do NOT validate eligibility locally.
+• Do NOT estimate EMI, approval chances, or loan limits.
+• Do NOT invent backend responses.
 
-LANGUAGE HANDLING:
-- Detect the user's language from their messages
-- Respond in the same language
-- If user switches languages, follow their lead
-- For code-mixed messages (Hindi-English), respond in the same style"""
+FLOW CONTROL:
+• You will be given a question structure.
+• You must start from Question 1.
+• After each valid answer, move to the next question.
+• After the final question, output only: "Thank you. Your information has been submitted for backend processing."
+
+ERROR HANDLING:
+• If a user refuses to answer → respond: "This information is required to continue. Please provide your answer."
+• If a user gives irrelevant input → repeat the same question.
+
+RESPONSE FORMAT:
+• Only output the question.
+• No explanations.
+• No extra text.
+• No emojis.
+• No conversational fillers.
+
+INTENT UNDERSTANDING:
+• You must properly understand the intent of the user's response.
+• Extract the relevant information from their answer.
+• If the answer is unclear, re-ask the same question.
+• If the user provides information for a future question, acknowledge it but continue with the current question.
+
+You are NOT a general chatbot.
+You are a controlled, deterministic question-collection agent."""
 
 
 def build_eligibility_explanation_prompt(
@@ -174,16 +193,22 @@ def build_clarification_prompt(
             has_income_mentioned = True
             break
     
-    prompt = f"""The user is applying for a loan, but we need more information.
+    prompt = f"""You are a strictly rule-following question-collection agent.
 
-MISSING INFORMATION: {missing_info}
+CURRENT QUESTION: {missing_info}
+
+CRITICAL RULES:
+- Ask ONLY ONE question - the exact question for {missing_info}
+- NO explanations, NO extra text, NO emojis
+- NO assumptions about what the user might have meant
+- If the user's previous answer was unclear, re-ask the SAME question clearly
+- If the user tries to answer a different question, politely redirect: "I need your answer to the current question first."
+- Output ONLY the question - nothing else
 """
     
     if missing_info == "employment duration" and has_income_mentioned:
         prompt += """
-IMPORTANT CONTEXT: The user has mentioned their income/salary. This means they are employed.
-We need to know how long they have been employed (employment duration) to assess loan eligibility.
-This is a critical requirement - someone with income must have employment duration.
+Context: The user mentioned income, so they are likely employed. We need how long they've been employed to assess eligibility.
 """
     
     prompt += """
@@ -194,25 +219,17 @@ RECENT CONVERSATION:
     
     if already_asked:
         prompt += f"""
-IMPORTANT: You have already asked for {missing_info} in the conversation above. 
-The user may have already provided it, but it wasn't extracted properly. 
-Instead of asking again, try to:
-1. Acknowledge their previous response
-2. Ask them to rephrase or provide the information in a different format
-3. Or move on to the next missing piece of information if this one is not critical
-
-Be helpful and don't repeat the same question verbatim."""
+IMPORTANT: You already asked for {missing_info}. Acknowledge that, avoid repeating, and politely ask for a clearer answer or confirmation.
+Keep it kind and non-repetitive."""
     else:
         if missing_info == "employment duration" and has_income_mentioned:
             prompt += f"""
-Ask the user about their employment duration. Since they have income, they must be employed.
-Ask: "How long have you been employed?" or "For how many months/years have you been working?"
-Be friendly and explain that this is needed for loan eligibility assessment."""
+Ask how long they have been employed (months/years). Explain briefly it's needed for eligibility.
+Keep it to one friendly sentence."""
         else:
             prompt += f"""
-Ask the user ONE clear, specific question to get the {missing_info}.
-Make it friendly and explain why you need this information.
-Be concise - one sentence question is enough."""
+Ask ONE clear, specific question for the {missing_info}. Keep it friendly, professional, and one sentence.
+Explain briefly it's needed to check eligibility."""
     
     prompt += f"\n\nIMPORTANT: Respond in {user_language} language."
     
@@ -421,22 +438,23 @@ class LLMService:
         if "employment_months" in extracted_data:
             provided_items.append("employment duration")
         
-        acknowledgment = ""
-        if provided_items:
-            acknowledgment = f"Thank you for providing: {', '.join(provided_items)}. "
-        
-        prompt = f"""The user is applying for a loan. {acknowledgment}We still need: {missing_info}
+        prompt = f"""You are a strictly rule-following question-collection agent.
+
+CURRENT QUESTION: {missing_info}
+
+CRITICAL RULES:
+- Ask ONLY ONE question for {missing_info}
+- NO explanations, NO extra text, NO emojis
+- NO acknowledgments or conversational fillers
+- Output ONLY the question - nothing else
+- If user's previous answer was unclear, re-ask the SAME question clearly
 
 RECENT CONVERSATION:
 """
         for msg in conversation_history[-4:]:
             prompt += f"{msg.role.upper()}: {msg.content}\n"
         
-        prompt += f"""
-Acknowledge what they provided (if anything), then ask for {missing_info} in a friendly, concise way.
-Keep it to 1-2 sentences maximum.
-
-IMPORTANT: Respond in {user_language} language."""
+        prompt += f"\nIMPORTANT: Respond in {user_language} language. Output ONLY the question."
         
         try:
             full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
@@ -454,22 +472,28 @@ IMPORTANT: Respond in {user_language} language."""
         """
         Ask user about existing loans/EMIs for accurate DTI calculation
         """
-        prompt = f"""The user is applying for a loan. We have their basic information (income, age, loan type, loan amount).
+        prompt = f"""You are a strictly rule-following question-collection agent.
 
-To calculate their eligibility accurately, we need to know about any existing financial obligations.
+CURRENT QUESTION: existing debts (loans/credit card payments)
 
-Ask them ONE friendly question about:
-- Any existing loans they're currently paying (EMI amount)
+CRITICAL RULES:
+- Ask ONLY ONE question about existing loans/EMIs and credit card payments
+- NO explanations, NO extra text, NO emojis
+- Output ONLY the question - nothing else
+- If user tries to skip or answer something else, repeat the same question
+
+You must ask ONE question covering:
+- Any existing loan EMIs
 - Any credit card minimum payments
 
-Keep it concise (1-2 sentences). If they don't have any, they can say "none" or "no existing loans".
+Keep it short (1-2 sentences). If they have none, they can say "none".
 
 RECENT CONVERSATION:
 """
         for msg in conversation_history[-4:]:
             prompt += f"{msg.role.upper()}: {msg.content}\n"
         
-        prompt += f"\nIMPORTANT: Respond in {user_language} language."
+        prompt += f"\nIMPORTANT: Respond in {user_language} language. Output ONLY the question."
         
         full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
         
@@ -477,7 +501,84 @@ RECENT CONVERSATION:
             response = self.model.generate_content(full_prompt)
             return self._extract_text(response)
         except Exception as e:
-            return f"Do you have any existing loans or credit card payments? (If none, please say 'none'.)"
+            return f"Do you have any existing loans or credit card payments?"
+    
+    def ask_greeting(
+        self,
+        user_language: str = "english",
+        session_id: str = "default"
+    ) -> str:
+        """
+        Generate a greeting message for new sessions
+        
+        Args:
+            user_language: User's preferred language
+            session_id: Session identifier
+        
+        Returns:
+            Greeting message text
+        """
+        prompt = f"""You are a strictly rule-following question-collection agent. This is the start of a new conversation.
+
+CRITICAL RULES:
+- Output ONLY a brief greeting (1-2 sentences maximum)
+- NO emojis, NO extra explanations
+- Simply greet and indicate you'll ask questions
+- Keep it professional and minimal
+
+IMPORTANT: Respond in {user_language} language."""
+        
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+        
+        try:
+            response = self.model.generate_content(full_prompt)
+            return self._extract_text(response)
+        except Exception as e:
+            if user_language.lower() in ["hindi", "हिंदी"]:
+                return "नमस्ते! मैं आपकी लोन पात्रता जांचने में मदद करूंगा। कृपया बताएं कि आपको कितने रुपये का लोन चाहिए?"
+            return "Hello! I'm here to help you check your loan eligibility. How much loan amount do you need?"
+    
+    def ask_about_employment_status(
+        self,
+        conversation_history: List[ConversationMessage],
+        user_language: str = "english",
+        session_id: str = "default"
+    ) -> str:
+        """
+        Ask user about their employment status (salaried or self-employed)
+        
+        Args:
+            conversation_history: Recent conversation
+            user_language: User's preferred language
+            session_id: Session identifier
+        
+        Returns:
+            Question about employment status
+        """
+        prompt = f"""You are a strictly rule-following question-collection agent.
+
+CURRENT QUESTION: employment status (salaried or self-employed)
+
+CRITICAL RULES:
+- Ask ONLY ONE question about employment status
+- NO explanations, NO extra text, NO emojis
+- Output ONLY the question - nothing else
+- If user tries to skip or answer something else, repeat the same question
+
+RECENT CONVERSATION:
+"""
+        for msg in conversation_history[-4:]:
+            prompt += f"{msg.role.upper()}: {msg.content}\n"
+        
+        prompt += f"\nIMPORTANT: Respond in {user_language} language. Output ONLY the question."
+        
+        full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+        
+        try:
+            response = self.model.generate_content(full_prompt)
+            return self._extract_text(response)
+        except Exception as e:
+            return f"Are you a salaried employee or self-employed? (Error: {str(e)})"
     
     def ask_clarification(
         self,

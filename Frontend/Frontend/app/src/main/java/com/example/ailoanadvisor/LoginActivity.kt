@@ -45,6 +45,12 @@ class LoginActivity : AppCompatActivity() {
                     .addOnCompleteListener { task ->
 
                         if (task.isSuccessful) {
+                            // ✅ Save login status
+                            getSharedPreferences("user", MODE_PRIVATE)
+                                .edit()
+                                .putBoolean("loggedIn", true)
+                                .apply()
+
                             Toast.makeText(this, "Login Successful!", Toast.LENGTH_SHORT).show()
                             startActivity(Intent(this, ChatActivity::class.java))
                             finish()

@@ -11,9 +11,21 @@
     <string name="eligibility_income_hint">Monthly Income</string>
     <string name="eligibility_emi_hint">Existing EMI</string>
     <string name="eligibility_check_button">Check Eligibility</string>
+    <string name="eligibility_fill_all_fields">Please fill in all fields</string>
+    <string name="eligibility_submission_successful">Submission successful!</string>
+    <string name="eligibility_form_submitted">✅ Form successfully submitted for review.</string>
     <string-array name="job_types">
         <item>Salaried</item>
         <item>Self-employed</item>
     </string-array>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_notifications">• Notifications</string>
+    <string name="settings_privacy">• Privacy &amp; Security</string>
+    <string name="settings_about">• About App</string>
+    <string name="settings_notifications_clicked">Notifications Clicked</string>
+    <string name="settings_privacy_clicked">Privacy &amp; Security Clicked</string>
+    <string name="settings_about_clicked">About App Clicked</string>
 
 </resources>

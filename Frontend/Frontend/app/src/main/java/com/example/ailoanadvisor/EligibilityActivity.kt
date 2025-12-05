@@ -23,36 +23,19 @@ class EligibilityActivity : AppCompatActivity() {
             val ageStr = binding.etAge.text.toString()
             val incomeStr = binding.etIncome.text.toString()
             val emiStr = binding.etEmi.text.toString()
+            val jobType = binding.spinnerJob.selectedItem.toString()
 
             // Validate that inputs are not empty
             if (ageStr.isEmpty() || incomeStr.isEmpty() || emiStr.isEmpty()) {
-                Toast.makeText(this, "Please fill in all fields", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, getString(R.string.eligibility_fill_all_fields), Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
 
-            // Safely parse numbers
-            val age = ageStr.toInt()
-            val income = incomeStr.toDouble()
-            val emi = emiStr.toDouble()
-
-            // --- Eligibility Logic ---
-            if (age < 21 || age > 60) {
-                binding.tvResult.text = "❌ Not Eligible: Age must be between 21–60"
-                return@setOnClickListener
-            }
-
-            if (income < 25000) {
-                binding.tvResult.text = "❌ Not Eligible: Minimum income should be ₹25,000"
-                return@setOnClickListener
-            }
-
-            if (emi > income * 0.4) {
-                binding.tvResult.text = "❌ Not Eligible: Existing EMI cannot exceed 40% of income"
-                return@setOnClickListener
-            }
-
-            // If all checks pass
-            binding.tvResult.text = "✅ ELIGIBLE FOR LOAN\n\nYou can apply safely!"
+            // Data is collected, but no local eligibility check is performed.
+            // This data would typically be sent to a server.
+            // For now, just display a confirmation message.
+            binding.tvResult.text = getString(R.string.eligibility_form_submitted)
+            Toast.makeText(this, getString(R.string.eligibility_submission_successful), Toast.LENGTH_LONG).show()
         }
     }
 }

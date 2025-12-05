@@ -136,6 +136,18 @@ class Orchestrator:
         
         self.sessions: Dict[str, PipelineContext] = {}
         
+        # Define the order of questions to ask
+        self.question_order = [
+            "greeting",           # 1. Greeting prompt
+            "loan amount",        # 2. Loan amount
+            "loan type",          # 2b. Loan type (needed for eligibility)
+            "monthly income",     # 3. Monthly salary
+            "age",                # 4. Age
+            "loan tenure",        # 5. Loan tenure
+            "employment status",  # 6. Employment status (salaried or not)
+            "existing debts",     # 7. Existing loans/payments
+        ]
+        
         logger.info(f"Orchestrator initialized: OCR={enable_ocr}, STT={self.enable_stt}")
     
     def process_request(
@@ -192,9 +204,91 @@ class Orchestrator:
     
     def _get_or_create_context(self, session_id: str) -> PipelineContext:
         """Get existing context or create new one"""
-        if session_id not in self.sessions:
+        is_new_session = session_id not in self.sessions
+        if is_new_session:
             self.sessions[session_id] = PipelineContext(session_id=session_id, user_input="")
+            self.sessions[session_id].metadata["is_new_session"] = True
         return self.sessions[session_id]
+    
+    def _is_new_session(self, context: PipelineContext) -> bool:
+        """Check if this is a new session (first message)"""
+        history = self.llm_service.get_history(context.session_id, limit=100)
+        # New session if no assistant messages yet (or only one user message)
+        assistant_messages = [msg for msg in history if msg.role == "assistant"]
+        return len(assistant_messages) == 0
+    
+    def _get_next_question(self, context: PipelineContext) -> Optional[str]:
+        """
+        Determine the next question to ask based on predefined order
+        
+        Order:
+        1. Greeting (if new session)
+        2. Loan amount
+        3. Monthly income
+        4. Age
+        5. Loan tenure
+        6. Employment status
+        7. Existing debts
+        8. Then eligibility analysis
+        """
+        profile = context.user_profile
+        
+        # Check if new session - return greeting
+        if self._is_new_session(context):
+            return "greeting"
+        
+        # Check each field in order
+        if not profile or not profile.loan_amount_requested or profile.loan_amount_requested == 0:
+            return "loan amount"
+        
+        # Check loan type - needed for eligibility calculation
+        if not profile or not profile.loan_type:
+            return "loan type"
+        
+        if not profile or not profile.monthly_income or profile.monthly_income == 0:
+            return "monthly income"
+        
+        if not profile or not profile.age or profile.age == 0:
+            return "age"
+        
+        if not profile or not profile.loan_tenure_years or profile.loan_tenure_years == 0:
+            return "loan tenure"
+        
+        # Check employment status - need to know if salaried or not
+        # We check if employment_months is set (for salaried employees)
+        # For self-employed, we might still need employment_months (business duration)
+        # But first check if we have income - if yes, we need employment status
+        if profile and profile.monthly_income and profile.monthly_income > 0:
+            # Have income - check if we know employment status
+            # Check history to see if we've asked about employment status
+            history = self.llm_service.get_history(context.session_id, limit=20)
+            asked_about_employment = any(
+                "salaried" in msg.content.lower() or "self-employed" in msg.content.lower() or "employment" in msg.content.lower()
+                for msg in history if msg.role == "assistant"
+            )
+            if not asked_about_employment:
+                return "employment status"
+            # If asked but no employment_months, we still need it
+            if not profile.employment_months or profile.employment_months == 0:
+                return "employment status"  # Ask again or ask for duration
+        
+        # Check existing debts
+        has_existing_debts = (
+            (profile.existing_loans_emi and profile.existing_loans_emi > 0) or
+            (profile.existing_credit_cards_min_payment and profile.existing_credit_cards_min_payment > 0)
+        )
+        # We need to explicitly ask if they have existing debts (even if 0, we should confirm)
+        # Check if we've asked about this before
+        history = self.llm_service.get_history(context.session_id, limit=20)
+        asked_about_debts = any(
+            "existing" in msg.content.lower() or "loan" in msg.content.lower() or "debt" in msg.content.lower()
+            for msg in history if msg.role == "assistant"
+        )
+        if not asked_about_debts:
+            return "existing debts"
+        
+        # All questions answered - return None to proceed with eligibility
+        return None
     
     def _run_stt(self, context: PipelineContext, audio_data: bytes) -> PipelineContext:
         """Stage 1: Speech-to-Text"""
@@ -477,6 +571,13 @@ class Orchestrator:
             history = self.llm_service.get_history(context.session_id, limit=10)
             context.conversation_history = history
             
+            # Check if we have eligibility result - if yes, explain it
+            # Determine next question in the sequence
+            next_question = self._get_next_question(context)
+            if next_question:
+                # We still need to ask questions; don't explain old eligibility results
+                context.eligibility_result = None
+            
             if context.eligibility_result:
                 eligibility = context.eligibility_result
                 profile_tenure = context.user_profile.loan_tenure_years if context.user_profile else 0
@@ -513,204 +614,43 @@ class Orchestrator:
                     context.session_id
                 )
             else:
-                nlu_result = context.component_results.get(PipelineStage.NLU)
-                if nlu_result and nlu_result.data:
-                    missing = nlu_result.data.get("missing", [])
-                    extracted = nlu_result.data.get("extracted", {})
-                    
-                    if extracted:
-                        fields_to_remove = []
-                        if "employment_months" in extracted or "employment_duration" in extracted:
-                            fields_to_remove.append("employment duration")
-                        if "monthly_income" in extracted:
-                            fields_to_remove.append("monthly income")
-                        if "age" in extracted:
-                            fields_to_remove.append("age")
-                        if "loan_type" in extracted:
-                            fields_to_remove.append("loan type")
-                        if "loan_amount_requested" in extracted:
-                            fields_to_remove.append("loan amount")
-                        if "loan_tenure_years" in extracted:
-                            fields_to_remove.extend(["loan tenure", "tenure"])
-                        
-                        missing = [m for m in missing if m not in fields_to_remove]
-                        
-                        has_income = (context.user_profile and context.user_profile.monthly_income > 0)
-                        
-                        if has_income:
-                            critical_missing = [m for m in missing]  # Don't filter out tenure - ask for it
-                        else:
-                            critical_missing = [m for m in missing if m not in ["employment duration"]]
-                        
-                        has_minimum = (
-                            context.user_profile and
-                            context.user_profile.monthly_income > 0 and
-                            context.user_profile.age > 0 and
-                            context.user_profile.loan_type and
-                            (not has_income or context.user_profile.employment_months > 0)  # Employment required if income exists
-                        )
-                        
-                        if has_minimum:
-                            needs_tenure = (not context.user_profile.loan_tenure_years or context.user_profile.loan_tenure_years == 0)
-                            
-                            if not critical_missing:
-                                if needs_tenure:
-                                    lang = user_language or self.llm_service.detect_language(context.user_input)
-                                    response = self.llm_service.ask_clarification(
-                                        "loan tenure",
-                                        history,
-                                        lang,
-                                        context.session_id
-                                    )
-                                elif (not context.user_profile.existing_loans_emi and 
-                                      not context.user_profile.existing_credit_cards_min_payment):
-                                    lang = user_language or self.llm_service.detect_language(context.user_input)
-                                    response = self.llm_service.ask_about_existing_debts(history, lang, context.session_id)
-                                else:
-                                    if context.user_profile and context.user_profile.loan_type:
-                                        eligibility_result = check_eligibility(context.user_profile)
-                                        context.eligibility_result = eligibility_result
-                                        
-                                        eligibility = eligibility_result
-                                        tenure_years = eligibility.max_tenure_years if eligibility.max_tenure_years > 0 else 5
-                                        
-                                        eligibility_context = EligibilityContext(
-                                            is_eligible=eligibility.is_eligible,
-                                            eligible_amount=eligibility.eligible_amount,
-                                            requested_amount=context.user_profile.loan_amount_requested if context.user_profile else 0,
-                                            suggested_emi=eligibility.suggested_emi,
-                                            tenure_years=tenure_years,
-                                            loan_type=context.user_profile.loan_type.value if context.user_profile and context.user_profile.loan_type else "unknown",
-                                            dti_ratio=eligibility.dti_ratio,
-                                            rejection_reasons=eligibility.rejection_reasons,
-                                            warnings=getattr(eligibility, "warnings", []),
-                                            user_profile={
-                                                "monthly_income": context.user_profile.monthly_income if context.user_profile else 0,
-                                                "age": context.user_profile.age if context.user_profile else 0,
-                                                "employment_months": context.user_profile.employment_months if context.user_profile else 0
-                                            }
-                                        )
-                                        eligibility_context.tenure_was_provided = False
-                                        
-                                        lang = user_language or self.llm_service.detect_language(context.user_input)
-                                        response = self.llm_service.explain_eligibility(
-                                            eligibility_context,
-                                            lang,
-                                            context.session_id
-                                        )
-                                    else:
-                                        lang = user_language or self.llm_service.detect_language(context.user_input)
-                                        response = self.llm_service.ask_clarification(
-                                            "loan type",
-                                            history,
-                                            lang,
-                                            context.session_id
-                                        )
-                        
-                        elif critical_missing:
-                            has_income = (context.user_profile and context.user_profile.monthly_income > 0)
-                            
-                            if has_income and "employment duration" in critical_missing:
-                                missing_field = "employment duration"
-                            elif "age" in critical_missing:
-                                missing_field = "age"
-                            elif "loan type" in critical_missing:
-                                missing_field = "loan type"
-                            elif "loan amount" in critical_missing:
-                                missing_field = "loan amount"
-                            elif "loan tenure" in critical_missing or "tenure" in critical_missing:
-                                missing_field = "loan tenure"
-                            else:
-                                last_assistant_msg = None
-                                for msg in reversed(history):
-                                    if msg.role == "assistant":
-                                        last_assistant_msg = msg.content.lower()
-                                        break
-                                
-                                missing_field = None
-                                for field in critical_missing:
-                                    if not last_assistant_msg or field.lower() not in last_assistant_msg:
-                                        missing_field = field
-                                        break
-                                
-                                if not missing_field:
-                                    missing_field = critical_missing[0]  # Fallback to first
-                            
-                            lang = user_language or self.llm_service.detect_language(context.user_input)
-                            
-                            response = self.llm_service.ask_clarification_with_acknowledgment(
-                                missing_field,
-                                extracted,
-                                history,
-                                lang,
-                                context.session_id
-                            )
-                        else:
-                            if context.user_profile and context.user_profile.loan_type:
-                                eligibility_result = check_eligibility(context.user_profile)
-                                context.eligibility_result = eligibility_result
-                                
-                                eligibility = eligibility_result
-                                tenure_years = eligibility.max_tenure_years if eligibility.max_tenure_years > 0 else 5
-                                
-                                eligibility_context = EligibilityContext(
-                                    is_eligible=eligibility.is_eligible,
-                                    eligible_amount=eligibility.eligible_amount,
-                                    requested_amount=context.user_profile.loan_amount_requested if context.user_profile else 0,
-                                    suggested_emi=eligibility.suggested_emi,
-                                    tenure_years=tenure_years,
-                                    loan_type=context.user_profile.loan_type.value if context.user_profile and context.user_profile.loan_type else "unknown",
-                                    dti_ratio=eligibility.dti_ratio,
-                                    rejection_reasons=eligibility.rejection_reasons,
-                                    warnings=getattr(eligibility, "warnings", []),
-                                    user_profile={
-                                        "monthly_income": context.user_profile.monthly_income if context.user_profile else 0,
-                                        "age": context.user_profile.age if context.user_profile else 0,
-                                        "employment_months": context.user_profile.employment_months if context.user_profile else 0
-                                    }
-                                )
-                                eligibility_context.tenure_was_provided = False
-                                
-                                lang = user_language or self.llm_service.detect_language(context.user_input)
-                                response = self.llm_service.explain_eligibility(
-                                    eligibility_context,
-                                    lang,
-                                    context.session_id
-                                )
-                            else:
-                                lang = user_language or self.llm_service.detect_language(context.user_input)
-                                response = self.llm_service.ask_clarification(
-                                    "loan type",
-                                    history,
-                                    lang,
-                                    context.session_id
-                                )
+                # Use sequential question flow (we already computed next_question above)
+                lang = user_language or self.llm_service.detect_language(context.user_input)
+                
+                if next_question == "greeting":
+                    response = self.llm_service.ask_greeting(lang, context.session_id)
+                elif next_question == "loan amount":
+                    response = self.llm_service.ask_clarification("loan amount", history, lang, context.session_id)
+                elif next_question == "loan type":
+                    response = self.llm_service.ask_clarification("loan type", history, lang, context.session_id)
+                elif next_question == "monthly income":
+                    response = self.llm_service.ask_clarification("monthly income", history, lang, context.session_id)
+                elif next_question == "age":
+                    response = self.llm_service.ask_clarification("age", history, lang, context.session_id)
+                elif next_question == "loan tenure":
+                    response = self.llm_service.ask_clarification("loan tenure", history, lang, context.session_id)
+                elif next_question == "employment status":
+                    # Check if we already have income - if yes, ask about employment duration
+                    if context.user_profile and context.user_profile.monthly_income > 0:
+                        # We have income, so ask about employment duration
+                        response = self.llm_service.ask_clarification("employment duration", history, lang, context.session_id)
                     else:
-                        critical_missing = [m for m in missing]
-                        
-                        if critical_missing:
-                            missing_field = critical_missing[0]
-                            lang = user_language or self.llm_service.detect_language(context.user_input)
-                            response = self.llm_service.ask_clarification(
-                                missing_field,
-                                history,
-                                lang,
-                                context.session_id
-                            )
-                        else:
-                            response = self.llm_service.generate_response(
-                                context.user_input,
-                                history,
-                                None,
-                                context.session_id
-                            )
+                        # Ask about employment status first
+                        response = self.llm_service.ask_about_employment_status(history, lang, context.session_id)
+                elif next_question == "existing debts":
+                    response = self.llm_service.ask_about_existing_debts(history, lang, context.session_id)
+                elif next_question is None:
+                    # All questions answered - output submission message only
+                    # Do NOT calculate or explain eligibility - that's backend processing
+                    response = "Thank you. Your information has been submitted for backend processing."
+                    
+                    # Still calculate eligibility in background for internal use, but don't show it to user
+                    if context.user_profile and context.user_profile.loan_type:
+                        eligibility_result = check_eligibility(context.user_profile)
+                        context.eligibility_result = eligibility_result
                 else:
-                    response = self.llm_service.generate_response(
-                        context.user_input,
-                        history,
-                        None,
-                        context.session_id
-                    )
+                    # Fallback - ask for the missing field
+                    response = self.llm_service.ask_clarification(next_question, history, lang, context.session_id)
             
             result.status = ComponentStatus.SUCCESS
             result.data = {"response": response}
@@ -765,15 +705,30 @@ class Orchestrator:
         llm_result = context.component_results.get(PipelineStage.LLM)
         response_text = llm_result.data.get("response", "No response generated") if llm_result else "Error generating response"
         
+        # Get missing info from NLU stage
+        missing_info = []
+        nlu_result = context.component_results.get(PipelineStage.NLU)
+        if nlu_result and nlu_result.data:
+            missing_info = nlu_result.data.get("missing", [])
+        
+        # Build eligibility result with full details
+        eligibility_result = None
+        if context.eligibility_result:
+            eligibility_result = {
+                "is_eligible": context.eligibility_result.is_eligible,
+                "eligible_amount": context.eligibility_result.eligible_amount,
+                "suggested_emi": context.eligibility_result.suggested_emi,
+                "dti_ratio": context.eligibility_result.dti_ratio,
+                "rejection_reasons": context.eligibility_result.rejection_reasons,
+                "max_tenure_years": getattr(context.eligibility_result, "max_tenure_years", None)
+            }
+        
         return {
             "response": response_text,
             "session_id": context.session_id,
             "extracted_data": context.extracted_data,
-            "eligibility_result": {
-                "is_eligible": context.eligibility_result.is_eligible if context.eligibility_result else None,
-                "eligible_amount": context.eligibility_result.eligible_amount if context.eligibility_result else None,
-                "suggested_emi": context.eligibility_result.suggested_emi if context.eligibility_result else None,
-            } if context.eligibility_result else None,
+            "eligibility_result": eligibility_result,
+            "missing_info": missing_info,
             "pipeline_status": {
                 stage.value: {
                     "status": result.status.value,

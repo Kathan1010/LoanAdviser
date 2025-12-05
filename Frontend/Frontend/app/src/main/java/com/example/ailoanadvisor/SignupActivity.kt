@@ -45,6 +45,10 @@ class SignupActivity : AppCompatActivity() {
                     .addOnCompleteListener { task ->
 
                         if (task.isSuccessful) {
+                            // ✅ Save user name locally
+                            val prefs = getSharedPreferences("user_prefs", MODE_PRIVATE)
+                            prefs.edit().putString("user_name", name).apply()
+
                             Toast.makeText(this, "Signup Successful!", Toast.LENGTH_SHORT).show()
 
                             startActivity(Intent(this, ChatActivity::class.java))

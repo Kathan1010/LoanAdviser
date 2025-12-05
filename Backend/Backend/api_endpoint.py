@@ -7,9 +7,10 @@ This file shows how to combine:
 3. LLM Service - generates friendly responses
 
 This is the main API endpoint that your React Native app will call.
+Now integrated with the Orchestrator for full pipeline processing.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
@@ -27,6 +28,8 @@ from llm_service import (
     EligibilityContext,
     ConversationMessage
 )
+from orchestrator import Orchestrator, PipelineStage
+
 app = FastAPI(title="Multilingual AI Loan Advisor API")
 
 app.add_middleware(
@@ -36,6 +39,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Initialize LLM service
 try:
     llm_service = LLMService()
 except ValueError as e:
@@ -45,6 +50,19 @@ except ValueError as e:
     print(str(e))
     print("=" * 60)
     raise
+
+# Initialize Orchestrator (reuses llm_service, enables STT, disables OCR for now)
+try:
+    orchestrator = Orchestrator(
+        llm_service=llm_service,
+        enable_ocr=False,  # Can be enabled when OCR is implemented
+        enable_stt=True    # Enable STT for audio processing
+    )
+    print("✅ Orchestrator initialized successfully")
+except Exception as e:
+    print(f"⚠️  Warning: Orchestrator initialization issue: {e}")
+    print("   Falling back to basic mode")
+    orchestrator = None
 
 class ChatRequest(BaseModel):
     """Request from mobile app"""
@@ -182,6 +200,7 @@ def extract_income(text: str) -> Optional[float]:
     """
     text = text.replace(",", "")
     text_lower = text.lower()
+    monthly_pattern = r"(\d+(?:\.\d+)?)\s*(?:k|thousand)?\s*(?:per month|monthly|pm)"
     income_k_pattern = r"(?:income|salary|earning|earn|make|get).*?(\d+(?:\.\d+)?)\s*k\b"
     match = re.search(income_k_pattern, text_lower)
     if match:
@@ -196,7 +215,6 @@ def extract_income(text: str) -> Optional[float]:
         num = float(match.group(1))
         if 10000 <= num <= 1000000:
             return num
-        monthly_pattern = r"(\d+(?:\.\d+)?)\s*(?:k|thousand)?\s*(?:per month|monthly|pm)"
     match = re.search(monthly_pattern, text_lower)
     if match:
         num_str = match.group(1)
@@ -538,34 +556,8 @@ def extract_financial_data(text: str, existing_profile: Optional[UserFinancialPr
 
 
 
-user_sessions: Dict[str, UserFinancialProfile] = {}
-
-
-def get_or_create_profile(session_id: str) -> UserFinancialProfile:
-    """Get existing profile or create new one"""
-    if session_id not in user_sessions:
-        user_sessions[session_id] = UserFinancialProfile(
-            monthly_income=0,
-            age=0,
-            employment_months=0
-        )
-    return user_sessions[session_id]
-
-
-def update_profile(session_id: str, updates: Dict):
-    """Update user profile with new data"""
-    profile = get_or_create_profile(session_id)
-    
-    for key, value in updates.items():
-        if hasattr(profile, key):
-            if key == "loan_tenure_years" and value is not None:
-                try:
-                    value = int(value)
-                except (ValueError, TypeError):
-                    value = 0
-            setattr(profile, key, value)
-    
-    user_sessions[session_id] = profile
+# Note: Session management is now handled by the Orchestrator
+# These functions are kept for backward compatibility with /eligibility/check endpoint
 
 
 
@@ -574,84 +566,42 @@ async def chat_endpoint(request: ChatRequest):
     """
     Main chat endpoint - handles conversational loan advisor
     
-    Flow:
-    1. Extract data from user message (NLU)
-    2. Update user profile
-    3. Check if we have enough info
-    4. If yes: Calculate eligibility → Generate LLM response
-    5. If no: Ask for missing info using LLM
+    Now uses the Orchestrator for full pipeline processing:
+    1. STT (if audio provided)
+    2. Normalization
+    3. NLU (Intent + Slot Extraction)
+    4. Rules Engine (Eligibility Calculation)
+    5. LLM (Generate Response)
+    6. DB/Audit (Logging)
     """
     try:
-        profile = get_or_create_profile(request.session_id)
+        if orchestrator is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Orchestrator not available. Please check server configuration."
+            )
         
-        llm_service.add_to_history(request.session_id, "user", request.message)
-        
-        extraction_result = extract_financial_data(request.message, profile)
-        extracted_data = extraction_result["extracted"]
-        missing_info = extraction_result["missing"]
-        
-        if extracted_data:
-            update_profile(request.session_id, extracted_data)
-            profile = get_or_create_profile(request.session_id)
-        
-        history = llm_service.get_history(request.session_id, limit=10)
-        
-        required_fields = ["monthly_income", "age", "loan_type"]
-        has_minimum_info = all(
-            getattr(profile, field, None) and getattr(profile, field, 0) > 0
-            for field in required_fields
+        # Process request through the full pipeline
+        pipeline_response = orchestrator.process_request(
+            session_id=request.session_id,
+            user_input=request.message,
+            user_language=request.user_language,
+            audio_data=None,  # Can be extended to accept audio files
+            document_data=None  # Can be extended to accept documents
         )
         
-        response_text = ""
-        eligibility_result = None
-        needs_clarification = False
+        # Extract data from pipeline response
+        response_text = pipeline_response.get("response", "No response generated")
+        extracted_data = pipeline_response.get("extracted_data", {})
+        eligibility_result_data = pipeline_response.get("eligibility_result")
+        missing_info = pipeline_response.get("missing_info", [])
         
-        if has_minimum_info:
-            result = check_eligibility(profile)
-            
-            eligibility_context = EligibilityContext(
-                is_eligible=result.is_eligible,
-                eligible_amount=result.eligible_amount,
-                requested_amount=profile.loan_amount_requested,
-                suggested_emi=result.suggested_emi,
-                tenure_years=int(profile.loan_tenure_years) if profile.loan_tenure_years and isinstance(profile.loan_tenure_years, (int, float)) and profile.loan_tenure_years > 0 else result.max_tenure_years,
-                loan_type=profile.loan_type.value if profile.loan_type else "unknown",
-                dti_ratio=result.dti_ratio,
-                rejection_reasons=result.rejection_reasons,
-                user_profile={
-                    "monthly_income": profile.monthly_income,
-                    "age": profile.age,
-                    "employment_months": profile.employment_months
-                }
-            )
-            
-            user_lang = request.user_language or llm_service.detect_language(request.message)
-            response_text = llm_service.explain_eligibility(
-                eligibility_context,
-                user_lang,
-                request.session_id
-            )
-            
-            eligibility_result = {
-                "is_eligible": result.is_eligible,
-                "eligible_amount": result.eligible_amount,
-                "suggested_emi": result.suggested_emi,
-                "dti_ratio": result.dti_ratio,
-                "rejection_reasons": result.rejection_reasons
-            }
-        else:
-            needs_clarification = True
-            missing_field = missing_info[0] if missing_info else "required information"
-            
-            user_lang = request.user_language or llm_service.detect_language(request.message)
-            response_text = llm_service.ask_clarification(
-                missing_field,
-                history,
-                user_lang,
-                request.session_id
-            )
+        # Determine if clarification is needed
+        # Check if eligibility was calculated (means we have enough info)
+        needs_clarification = eligibility_result_data is None
         
-        llm_service.add_to_history(request.session_id, "assistant", response_text)
+        # Use eligibility result directly (orchestrator now includes all fields)
+        eligibility_result = eligibility_result_data
         
         return ChatResponse(
             response=response_text,
@@ -662,8 +612,106 @@ async def chat_endpoint(request: ChatRequest):
             missing_info=missing_info if missing_info else None
         )
     
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+
+
+@app.post("/chat/audio", response_model=ChatResponse)
+async def chat_audio_endpoint(
+    audio_file: UploadFile = File(..., description="Audio file (mp3, wav, m4a, etc.)"),
+    session_id: str = Form("default", description="Session ID for conversation tracking"),
+    user_language: Optional[str] = Form(None, description="User's preferred language (e.g., 'english', 'hindi')")
+):
+    """
+    Chat endpoint with audio input - handles voice queries
+    
+    Accepts audio files and processes them through the full pipeline:
+    1. STT (Speech-to-Text) - converts audio to text
+    2. Normalization - text cleaning
+    3. NLU (Intent + Slot Extraction)
+    4. Rules Engine (Eligibility Calculation)
+    5. LLM (Generate Response)
+    6. DB/Audit (Logging)
+    
+    Supported audio formats: mp3, wav, m4a, flac, ogg, etc.
+    """
+    try:
+        if orchestrator is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Orchestrator not available. Please check server configuration."
+            )
+        
+        # Validate audio file
+        if not audio_file.content_type or not audio_file.content_type.startswith('audio/'):
+            # Allow if content_type is not set (some clients don't send it)
+            # We'll let Whisper handle format validation
+            pass
+        
+        # Read audio file content
+        audio_data = await audio_file.read()
+        
+        if len(audio_data) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Audio file is empty. Please upload a valid audio file."
+            )
+        
+        # Process request through the full pipeline with audio
+        pipeline_response = orchestrator.process_request(
+            session_id=session_id,
+            user_input="",  # Will be generated from audio via STT
+            user_language=user_language,
+            audio_data=audio_data,  # Pass audio data for STT processing
+            document_data=None
+        )
+        
+        # Extract data from pipeline response
+        response_text = pipeline_response.get("response", "No response generated")
+        extracted_data = pipeline_response.get("extracted_data", {})
+        eligibility_result_data = pipeline_response.get("eligibility_result")
+        missing_info = pipeline_response.get("missing_info", [])
+        
+        # Get transcribed text from STT stage (if available)
+        pipeline_status = pipeline_response.get("pipeline_status", {})
+        stt_status = pipeline_status.get("stt", {})
+        transcribed_text = None
+        
+        # Try to get transcribed text from orchestrator context
+        if orchestrator.sessions.get(session_id):
+            context = orchestrator.sessions[session_id]
+            stt_result = context.component_results.get(PipelineStage.STT)
+            if stt_result and stt_result.data:
+                transcribed_text = stt_result.data.get("text")
+        
+        # Add transcribed text to extracted_data if available
+        if transcribed_text and extracted_data:
+            extracted_data["transcribed_text"] = transcribed_text
+        
+        # Determine if clarification is needed
+        needs_clarification = eligibility_result_data is None
+        
+        # Use eligibility result directly (orchestrator now includes all fields)
+        eligibility_result = eligibility_result_data
+        
+        return ChatResponse(
+            response=response_text,
+            session_id=session_id,
+            extracted_data=extracted_data if extracted_data else None,
+            eligibility_result=eligibility_result,
+            needs_clarification=needs_clarification,
+            missing_info=missing_info if missing_info else None
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing audio request: {str(e)}"
+        )
 
 
 @app.post("/eligibility/check")
